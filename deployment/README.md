@@ -1,190 +1,307 @@
 # Deployment Playbook: React + Express + MySQL Multi-Server Setup
 
-This guide provides step-by-step instructions to deploy the Siv Dashboard application across three servers using **MobaXterm**.
+This is the **single complete deployment reference** for the Siv Inventory Management System.  
+All configuration (Nginx, PM2, environment) is embedded directly in this document — no separate config files required.
 
 ---
 
 ## 🌐 Infrastructure Topology
 
-```mermaid
-graph TD
-    User([User Web Browser]) -->|HTTP Port 80| FE[Frontend Server: 172.16.16.159]
-    FE -->|Loads React App| User
-    User -.->|XHR API Requests Port 5000| BE[Backend Server: 172.16.16.69]
-    BE -->|SQL Queries Port 3306| DB[(MySQL Database: 192.168.108.234)]
+```
+User Browser
+     │
+     │  HTTP :80  →  frontend.siv.org
+     ▼
+Frontend Server ──────────────────── 172.16.16.159
+  Nginx → /var/www/frontend/dist
+     │
+     │  API Requests :5000  →  backend.siv.org:5000
+     ▼
+Backend Server ───────────────────── 172.16.16.69
+  Node.js / Express (PM2 Cluster)
+     │
+     │  MySQL :3306
+     ▼
+Database Server ──────────────────── 192.168.108.234
+  MySQL  →  siv_db  →  products table
 ```
 
-| Component | Target IP Address | Software Stack | Port Configuration |
-| :--- | :--- | :--- | :--- |
-| **Database** | `192.168.108.234` | MySQL Server | Inbound: `3306` (Allow `172.16.16.69`) |
-| **Backend API** | `172.16.16.69` | Node.js, Express, PM2 | Inbound: `5000` (Allow `172.16.16.159`) |
-| **Frontend client** | `172.16.16.159` | Nginx, React (Static dist) | Inbound: `80` (Public) & `443` |
-| **Domain Name** | `siv.com` | DNS A Record | Points to `172.16.16.159` |
+| Component | IP Address | Software | Port | Domain |
+| :--- | :--- | :--- | :--- | :--- |
+| **Database** | `192.168.108.234` | MySQL Server | `3306` | — |
+| **Backend API** | `172.16.16.69` | Node.js, Express, PM2 | `5000` | `backend.siv.org` |
+| **Frontend** | `172.16.16.159` | Nginx, React (Vite) | `80` | `frontend.siv.org` |
 
 ---
 
-## 🛠️ Step 1: Database Server Deployment (`192.168.108.234`)
+## 🔗 Step 1: DNS Configuration (`siv.org` via ISPConfig)
 
-### 1. SSH Connection in MobaXterm
-1. Open MobaXterm.
-2. Click **Session** -> **SSH**.
-3. Set **Remote host** to `192.168.108.234` and username (e.g. `root` or admin user). Click **OK**.
+Configure DNS **first** so that records propagate while you deploy the servers.
 
-### 2. Install MySQL Server (Ubuntu/Debian)
-In the terminal session, execute:
+### 1.1 Add A Records in ISPConfig
+1. Log in to **ISPConfig** → **DNS** → **Zones** → click `siv.org`.
+2. Open the **Records** tab.
+3. Click **A** and add each record below:
+
+| Type | Name | Data (IP) | TTL |
+| :--- | :--- | :--- | :--- |
+| `A` | `frontend` | `172.16.16.159` | `3600` |
+| `A` | `backend` | `172.16.16.69` | `3600` |
+
+> This makes:
+> - `frontend.siv.org` → Frontend Server `172.16.16.159`
+> - `backend.siv.org` → Backend Server `172.16.16.69`
+
+### 1.2 Local Testing Override (Windows Hosts File)
+
+> [!IMPORTANT]
+> You must **edit the existing `hosts` file** — do NOT create a new `.txt` file.  
+> The hosts file has **no file extension**.
+
+1. Press **Win + S**, search for **Notepad**, right-click → **Run as administrator**.
+2. In Notepad, go to **File** → **Open**.
+3. In the file path bar, type exactly:
+   ```
+   C:\Windows\System32\drivers\etc\
+   ```
+4. In the bottom-right dropdown, change **Text Documents (\*.txt)** to **All Files (\*.\*)**.
+5. You will now see the `hosts` file (no extension) — click it and click **Open**.
+6. Scroll to the bottom of the file and add these two lines:
+   ```
+   172.16.16.159    frontend.siv.org
+   172.16.16.69     backend.siv.org
+   ```
+7. Press **Ctrl+S** to save. Close Notepad.
+8. Open your browser and navigate to `http://frontend.siv.org` — it should now resolve.
+
+---
+
+## 🛠️ Step 2: Database Server (`192.168.108.234`)
+
+### 2.1 Connect via MobaXterm SSH
+
+1. Open **MobaXterm** → **Session** → **SSH**.
+2. Set **Remote host** to `192.168.108.234`.
+3. Check **Specify username** and enter `pnc`.
+4. Click **OK** and enter the password when prompted.
+
+> [!WARNING]
+> If you see **`Permission denied (publickey,password)`**, the database server may use a **different username** or may require an **SSH key**. Try the following:
+
+**Fix A — Try a different username:**
+```bash
+# Try root
+ssh root@192.168.108.234
+
+# Try ubuntu (common on cloud VMs)
+ssh ubuntu@192.168.108.234
+```
+
+**Fix B — SSH key not loaded in MobaXterm:**
+1. In MobaXterm → **Session** → **SSH** → **Advanced SSH settings** tab.
+2. Check **Use private key** and browse to your `.pem` or `id_rsa` private key file.
+3. Click **OK** to reconnect.
+
+**Fix C — Enable password authentication on the server** *(requires console/VNC access to the DB server)*:
+```bash
+sudo nano /etc/ssh/sshd_config
+```
+Set:
+```ini
+PasswordAuthentication yes
+PubkeyAuthentication yes
+```
+Then restart SSH:
+```bash
+sudo systemctl restart ssh
+```
+
+### 2.2 Install MySQL Server
 ```bash
 sudo apt update
 sudo apt install -y mysql-server
 ```
 
-### 3. Configure Remote Network Access
-By default, MySQL binds to `localhost` (`127.0.0.1`), blocking connection requests from the Backend Server.
-1. Open the configuration file:
-   ```bash
-   sudo nano /etc/mysql/mysql.conf.d/mysqld.cnf
-   ```
-2. Find the line starting with `bind-address` and change it to `0.0.0.0` (listen on all interfaces):
-   ```ini
-   bind-address = 0.0.0.0
-   ```
-3. Save the file (Press `Ctrl+O`, then `Enter`, then exit nano with `Ctrl+X`).
-4. Restart MySQL to apply configuration:
-   ```bash
-   sudo systemctl restart mysql
-   sudo systemctl enable mysql
-   ```
+### 2.3 Allow Remote Connections
+```bash
+sudo nano /etc/mysql/mysql.conf.d/mysqld.cnf
+```
+Find and update:
+```ini
+bind-address = 0.0.0.0
+```
+Save (`Ctrl+O` → `Enter` → `Ctrl+X`), then restart:
+```bash
+sudo systemctl restart mysql
+sudo systemctl enable mysql
+```
 
-### 4. Setup Database and remote Access User
-Log in to MySQL command-line utility:
+### 2.4 Create Database and User
 ```bash
 sudo mysql -u root
 ```
-Copy and paste the database creation instructions directly:
 ```sql
--- Create Database
-CREATE DATABASE IF NOT EXISTS `siv_db` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS `siv_db`
+  CHARACTER SET utf8mb4
+  COLLATE utf8mb4_unicode_ci;
 
--- Create User and Grant Remote Privileges to Backend Server (172.16.16.69)
 CREATE USER IF NOT EXISTS 'siv_user'@'%' IDENTIFIED BY 'siv_password_2026';
 GRANT ALL PRIVILEGES ON `siv_db`.* TO 'siv_user'@'%';
 FLUSH PRIVILEGES;
 
--- Verify user creation
+-- Verify
 SELECT user, host FROM mysql.user;
 EXIT;
 ```
 
-### 5. Import the Schema
-Using MobaXterm's built-in **SFTP Sidebar** (located on the left panel):
+### 2.5 Import Schema & Sample Data
+Using MobaXterm's **SFTP sidebar**:
 1. Navigate to `/tmp` in the SFTP panel.
-2. Drag and drop the file `database/schema.sql` from your local computer into the SFTP file list.
-3. Import the file inside the SSH terminal:
-   ```bash
-   mysql -u siv_user -p siv_db < /tmp/schema.sql
-   # Enter password: siv_password_2026
-   ```
+2. Drag and drop `database/schema.sql` from your local machine.
+3. Import:
+```bash
+mysql -u siv_user -p siv_db < /tmp/schema.sql
+# Password: siv_password_2026
+```
+> Verify in **phpMyAdmin** at `http://192.168.108.234/phpmyadmin` — `siv_db` → `products` table with 8 sample rows.
 
-### 6. Firewall Configuration
-Ensure port `3306` is open for backend server requests:
+### 2.6 Firewall
 ```bash
 sudo ufw allow from 172.16.16.69 to any port 3306 proto tcp
 sudo ufw reload
+sudo ufw status
 ```
 
 ---
 
-## ⚙️ Step 2: Backend API Server Deployment (`172.16.16.69`)
+## ⚙️ Step 3: Backend API Server (`172.16.16.69`)
 
-### 1. SSH Connection in MobaXterm
-1. Click **Session** -> **SSH**.
-2. Set **Remote host** to `172.16.16.69` and click **OK**.
+### 3.1 Connect via MobaXterm SSH
+Remote host: `172.16.16.69`, username: `pnc`.
 
-### 2. Install Node.js (LTS Version)
-Run the NodeSource setup script to install Node.js v20:
+### 3.2 Install Node.js v20 (LTS)
 ```bash
-sudo apt update
-sudo apt install -y curl
+sudo apt update && sudo apt install -y curl
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 sudo apt install -y nodejs
 node -v && npm -v
 ```
 
-### 3. Install PM2 (Process Manager) globally
+### 3.3 Install PM2 Process Manager
 ```bash
-sudo npm install -y -g pm2
+sudo npm install -g pm2
 ```
 
-### 4. Upload Code via SFTP
-1. In the SSH terminal, create the directory structure:
-   ```bash
-   sudo mkdir -p /var/www/siv/backend
-   sudo chown -R $USER:$USER /var/www/siv/backend
-   ```
-2. In MobaXterm's **SFTP Sidebar**, navigate to `/var/www/siv/backend`.
-3. Drag and drop the following files from your local workspace `backend/` folder into the SFTP pane:
-   - `server.js`
-   - `package.json`
-   - `pm2-backend.config.js` (initially in `deployment/`)
-   - `.env.example`
-
-### 5. Configure environment properties
-1. Rename the environment file or create one directly:
-   ```bash
-   nano /var/www/siv/backend/.env
-   ```
-2. Add the configuration matching your environment:
-   ```env
-   PORT=5000
-   NODE_ENV=production
-   DB_HOST=192.168.108.234
-   DB_PORT=3306
-   DB_USER=siv_user
-   DB_PASSWORD=siv_password_2026
-   DB_NAME=siv_db
-   CORS_ORIGIN=http://172.16.16.159,http://siv.com
-   ```
-3. Save and close nano.
-
-### 6. Install Dependencies and Launch App
+### 3.4 Prepare Directory and Upload Code
 ```bash
-cd /var/www/siv/backend
-npm install --production
+sudo mkdir -p /var/www/backend
+sudo chown -R $USER:$USER /var/www/backend
+```
+In MobaXterm's **SFTP sidebar**, navigate to `/var/www/backend` and upload:
+- `backend/server.js`
+- `backend/package.json`
 
-# Start Express Application with PM2 Cluster Config
+### 3.5 Create PM2 Config on Server
+```bash
+nano /var/www/backend/pm2-backend.config.js
+```
+Paste the following:
+```js
+// ============================================================================
+// PM2 Configuration for Siv Backend
+// Server IP:       172.16.16.69
+// Target Location: /var/www/backend/pm2-backend.config.js
+// Domain:          backend.siv.org
+// ============================================================================
+
+module.exports = {
+  apps: [
+    {
+      name: 'siv-backend',
+      script: './server.js',
+      cwd: '/var/www/backend',
+      instances: 'max',         // Cluster mode — one process per CPU core
+      exec_mode: 'cluster',
+      autorestart: true,        // Auto-restart on crash
+      watch: false,             // Never watch in production
+      max_memory_restart: '1G', // Restart if memory exceeds 1 GB
+      env: {
+        NODE_ENV: 'production',
+        PORT: 5000
+      }
+    }
+  ]
+};
+```
+Save and exit.
+
+### 3.6 Create Environment File
+```bash
+nano /var/www/backend/.env
+```
+Paste:
+```env
+# Server
+PORT=5000
+NODE_ENV=production
+
+# Database (192.168.108.234)
+DB_HOST=192.168.108.234
+DB_PORT=3306
+DB_USER=siv_user
+DB_PASSWORD=siv_password_2026
+DB_NAME=siv_db
+
+# CORS — allow requests from the frontend origin
+CORS_ORIGIN=http://frontend.siv.org,http://172.16.16.159
+```
+Save and exit.
+
+### 3.7 Install Dependencies and Launch
+```bash
+cd /var/www/backend
+npm install --omit=dev
+
+# Start with PM2
 pm2 start pm2-backend.config.js
 
-# Ensure PM2 starts automatically on server reboots
+# Save process list and enable auto-start on reboot
 pm2 save
 pm2 startup
 ```
-*(Copy and paste the `sudo env PATH=...` output command generated by `pm2 startup` into the terminal to complete boot registration).*
+> Copy and paste the `sudo env PATH=...` command printed by `pm2 startup` to register boot startup.
 
-### 7. Firewall Configuration
-Ensure port `5000` accepts connections from the frontend server:
+### 3.8 Verify Backend
+```bash
+pm2 list
+pm2 logs siv-backend --lines 20
+curl http://localhost:5000/api/health
+```
+Expected: `{"status":"online","database":{"status":"connected",...}}`
+
+### 3.9 Firewall
 ```bash
 sudo ufw allow from 172.16.16.159 to any port 5000 proto tcp
 sudo ufw reload
+sudo ufw status
 ```
 
 ---
 
-## 🖥️ Step 3: Frontend Server Deployment (`172.16.16.159`)
+## 🖥️ Step 4: Frontend Server (`172.16.16.159`)
 
-### 1. Build the Frontend App Locally
-Before uploading, you must build the client distribution assets on your local developer machine.
-1. Open PowerShell or Command Prompt in the `frontend` folder.
-2. Run:
-   ```bash
-   npm install
-   npm run build
-   ```
-   *This compiles files into `frontend/dist`.*
+### 4.1 Build Locally (Windows)
+On your local machine, open PowerShell in the `frontend/` folder:
+```powershell
+npm install
+npm run build
+```
+Output: `frontend/dist/` — contains `index.html` and `assets/`.
 
-### 2. Connect via MobaXterm SSH to Frontend Server
-1. Click **Session** -> **SSH**.
-2. Set **Remote host** to `172.16.16.159` and click **OK**.
+### 4.2 Connect via MobaXterm SSH
+Remote host: `172.16.16.159`, username: `pnc`.
 
-### 3. Install Nginx
+### 4.3 Install Nginx
 ```bash
 sudo apt update
 sudo apt install -y nginx
@@ -192,92 +309,139 @@ sudo systemctl start nginx
 sudo systemctl enable nginx
 ```
 
-### 4. Upload Build Artifacts
-1. Create directories:
-   ```bash
-   sudo mkdir -p /var/www/siv/frontend
-   sudo chown -R $USER:$USER /var/www/siv/frontend
-   ```
-2. Navigate to `/var/www/siv/frontend` in MobaXterm's SFTP pane.
-3. Drag and drop the **entire `dist` folder** (produced in your local `frontend/dist` directory) into `/var/www/siv/frontend`.
-4. Confirm path is `/var/www/siv/frontend/dist` and contains `index.html` and the `assets/` directory.
+### 4.4 Prepare Directory and Upload Build
+```bash
+sudo mkdir -p /var/www/frontend
+sudo chown -R $USER:$USER /var/www/frontend
+```
+In MobaXterm's **SFTP sidebar**, navigate to `/var/www/frontend`.  
+Drag and drop the **entire `dist/` folder** from your local `frontend/dist/`.
 
-### 5. Install Nginx Site Configuration
-1. Open Nginx configuration panel:
-   ```bash
-   sudo nano /etc/nginx/sites-available/siv-frontend
-   ```
-2. Paste the following configuration (equivalent to `nginx-frontend.conf`):
-   ```nginx
-   server {
-       listen 80;
-       listen [::]:80;
+Verify:
+```bash
+ls /var/www/frontend/dist
+# Expected: index.html  assets/
+```
 
-       server_name siv.com www.siv.com 172.16.16.159;
+### 4.5 Create Nginx Site Configuration
+```bash
+sudo nano /etc/nginx/sites-available/siv-frontend
+```
+Paste the following:
+```nginx
+# ============================================================================
+# Nginx Configuration for Siv Frontend
+# Server IP:       172.16.16.159
+# Target Location: /etc/nginx/sites-available/siv-frontend
+# Domain:          frontend.siv.org  (ISPConfig DNS A Record)
+# Web Root:        /var/www/frontend/dist
+# ============================================================================
 
-       root /var/www/siv/frontend/dist;
-       index index.html;
+server {
+    listen 80;
+    listen [::]:80;
 
-       location / {
-           try_files $uri $uri/ /index.html;
-       }
+    server_name frontend.siv.org 172.16.16.159;
 
-       # Logs
-       access_log /var/log/nginx/siv-frontend-access.log;
-       error_log /var/log/nginx/siv-frontend-error.log;
-   }
-   ```
-3. Save and close.
-4. Enable the site and disable default site:
-   ```bash
-   sudo ln -sf /etc/nginx/sites-available/siv-frontend /etc/nginx/sites-enabled/
-   sudo rm -f /etc/nginx/sites-enabled/default
-   ```
-5. Test configuration and reload Nginx:
-   ```bash
-   sudo nginx -t
-   sudo systemctl reload nginx
-   ```
+    root /var/www/frontend/dist;
+    index index.html;
 
-### 6. Firewall Configuration
-Allow public HTTP and HTTPS traffic:
+    # Gzip compression for faster page loading
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 10240;
+    gzip_proxied any;
+    gzip_types text/plain text/css text/xml text/javascript
+               application/javascript application/x-javascript application/xml;
+    gzip_disable "MSIE [1-6]\.";
+
+    # Cache static assets (CSS, JS, images, fonts) for 1 month
+    location ~* \.(?:css|js|jpg|jpeg|gif|png|ico|svg|woff|woff2|webm|mp4)$ {
+        expires 1M;
+        access_log off;
+        add_header Cache-Control "public, no-transform";
+    }
+
+    # SPA fallback — all routes serve index.html
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    access_log /var/log/nginx/siv-frontend-access.log;
+    error_log  /var/log/nginx/siv-frontend-error.log;
+}
+```
+Save and exit.
+
+### 4.6 Enable Site and Reload Nginx
+```bash
+sudo ln -sf /etc/nginx/sites-available/siv-frontend /etc/nginx/sites-enabled/
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+### 4.7 Firewall
 ```bash
 sudo ufw allow 'Nginx Full'
 sudo ufw reload
+sudo ufw status
 ```
 
 ---
 
-## 🔗 Step 4: DNS Configuration (siv.com)
+## 🔍 Step 5: Verification Checklist
 
-To resolve the domain `siv.com` to the frontend IP `172.16.16.159`:
+### Database (`192.168.108.234`)
+- [ ] `sudo systemctl status mysql` → **active (running)**
+- [ ] phpMyAdmin: `siv_db` → `products` table exists with 8 sample rows
+- [ ] From backend server: `mysql -h 192.168.108.234 -u siv_user -p siv_db` → connects OK
 
-### Production Setup (DNS Provider)
-Create an **A Record** on your domain registrar control panel:
-- Type: `A`
-- Name/Host: `@` (or leave blank)
-- Value/IP: `172.16.16.159`
-- TTL: `Auto` (or `3600`)
+### Backend (`172.16.16.69` / `backend.siv.org`)
+- [ ] `pm2 list` → `siv-backend` status is **online**
+- [ ] `curl http://localhost:5000/api/health` → `{"status":"online","database":{"status":"connected"}}`
+- [ ] `curl http://localhost:5000/api/products` → returns JSON array of products
 
-Create a **CNAME Record** for subdomains:
-- Type: `CNAME`
-- Name/Host: `www`
-- Value/Target: `siv.com`
+### Frontend (`172.16.16.159` / `frontend.siv.org`)
+- [ ] `sudo systemctl status nginx` → **active (running)**
+- [ ] `ls /var/www/frontend/dist` → shows `index.html` and `assets/`
+- [ ] Browser: `http://172.16.16.159` → Siv Inventory UI loads
 
-### Local Testing Override (Hosts File)
-If testing internally on Windows without real DNS setup, edit your local `hosts` file:
-1. Open Notepad as **Administrator**.
-2. Open file `C:\Windows\System32\drivers\etc\hosts`.
-3. Add these lines:
-   ```text
-   172.16.16.159    siv.com
-   172.16.16.159    www.siv.com
-   ```
-4. Save and restart browser. You can now access `http://siv.com` in your browser.
+### End-to-End
+- [ ] Browser: `http://frontend.siv.org` → UI loads correctly
+- [ ] Click **Refresh** — product list loads without errors (Frontend → Backend ✅)
+- [ ] Click **Add Product**, submit a test item — it appears in the list (Backend → MySQL ✅)
+- [ ] phpMyAdmin → `siv_db` → `products` → new row is visible (MySQL write confirmed ✅)
 
 ---
 
-## 🔍 Verification Checklist
-- [ ] Connect to `http://siv.com` or `http://172.16.16.159` - Verify the UI loads successfully.
-- [ ] Click the **Refresh** button on the header - Verify it doesn't show connection error alerts (proving Frontend -> Backend connection is active).
-- [ ] Click **Add Product** and submit a test SKU - Verify the item is written (proving Backend -> MySQL connection is active).
+## ⚠️ Common Issues & Fixes
+
+| Problem | Likely Cause | Fix |
+| :--- | :--- | :--- |
+| Blank page on `frontend.siv.org` | Wrong Nginx `root` path or `dist/` not uploaded | Verify `root /var/www/frontend/dist;` and run `ls /var/www/frontend/dist` |
+| CORS error in browser console | `CORS_ORIGIN` missing `http://frontend.siv.org` | Edit `/var/www/backend/.env`, add the origin, then `pm2 restart siv-backend` |
+| Backend can't reach MySQL | `bind-address` still `127.0.0.1` or UFW blocking | Set `bind-address = 0.0.0.0` in `mysqld.cnf`; allow port 3306 from `172.16.16.69` |
+| PM2 not running after reboot | `pm2 startup` command not applied | Run `pm2 startup`, then run the printed `sudo env PATH=...` command |
+| `nginx -t` fails | Syntax error in site config | Re-paste the Nginx block carefully; check for missing semicolons |
+| DNS not resolving | Propagation delay or wrong ISPConfig A record | Verify A record IP in ISPConfig; use hosts file for immediate local testing |
+
+---
+
+## 📁 Project File Reference
+
+```
+deploy_project/
+├── backend/
+│   ├── server.js              # Express API (ES Module, port 5000)
+│   ├── package.json           # Dependencies: express, cors, mysql2, dotenv
+│   └── .env.example           # Environment variable template
+├── database/
+│   └── schema.sql             # Creates siv_db, siv_user, products table + 8 sample rows
+├── frontend/
+│   ├── src/                   # React source files
+│   ├── dist/                  # ← Built output: upload to /var/www/frontend/dist
+│   └── package.json           # Vite + React 18
+└── deployment/
+    └── README.md              # ← THIS FILE — single complete deployment reference
+```

@@ -1,24 +1,10 @@
 // ============================================================================
-// PM2 Configuration for Siv Backend
-// Server IP: 172.16.16.69
-// Target Location: /var/www/siv/backend/pm2-backend.config.js
+// DEPRECATED — This file has been consolidated into deployment/README.md
+//
+// The full PM2 configuration is now embedded in:
+//   deployment/README.md  →  Step 3.5 "Create PM2 Config on Server"
+//
+// To deploy, follow the README instructions and create this file
+// directly on the backend server (172.16.16.69):
+//   nano /var/www/backend/pm2-backend.config.js
 // ============================================================================
-
-module.exports = {
-  apps: [
-    {
-      name: 'siv-backend',
-      script: './server.js',
-      cwd: '/var/www/siv/backend',
-      instances: 'max', // Run in cluster mode utilizing all CPU cores
-      exec_mode: 'cluster',
-      autorestart: true, // Auto restart if backend crashes
-      watch: false, // Set to true only in dev environment
-      max_memory_restart: '1G', // Restart if leaks make it exceed 1GB memory
-      env: {
-        NODE_ENV: 'production',
-        PORT: 5000
-      }
-    }
-  ]
-};
