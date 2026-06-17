@@ -10,12 +10,12 @@ All configuration (Nginx, PM2, environment) is embedded directly in this documen
 ```
 User Browser
      │
-     │  HTTP :80  →  frontend.siv.org
+     │  HTTP :80  →  pnc.frontend.siv.org
      ▼
 Frontend Server ──────────────────── 172.16.16.159
   Nginx → /var/www/frontend/dist
      │
-     │  API Requests :5000  →  backend.siv.org:5000
+     │  API Requests :5000  →  pnc.backend.siv.org:5000
      ▼
 Backend Server ───────────────────── 172.16.16.69
   Node.js / Express (PM2 Cluster)
@@ -29,8 +29,8 @@ Database Server ──────────────────── 192
 | Component | IP Address | Software | Port | Domain |
 | :--- | :--- | :--- | :--- | :--- |
 | **Database** | `192.168.108.234` | MySQL Server | `3306` | — |
-| **Backend API** | `172.16.16.69` | Node.js, Express, PM2 | `5000` | `backend.siv.org` |
-| **Frontend** | `172.16.16.159` | Nginx, React (Vite) | `80` | `frontend.siv.org` |
+| **Backend API** | `172.16.16.69` | Node.js, Express, PM2 | `5000` | `pnc.backend.siv.org` |
+| **Frontend** | `172.16.16.159` | Nginx, React (Vite) | `80` | `pnc.frontend.siv.org` |
 
 ---
 
@@ -49,8 +49,8 @@ Configure DNS **first** so that records propagate while you deploy the servers.
 | `A` | `backend` | `172.16.16.69` | `3600` |
 
 > This makes:
-> - `frontend.siv.org` → Frontend Server `172.16.16.159`
-> - `backend.siv.org` → Backend Server `172.16.16.69`
+> - `pnc.frontend.siv.org` → Frontend Server `172.16.16.159`
+> - `pnc.backend.siv.org` → Backend Server `172.16.16.69`
 
 ### 1.2 Local Testing Override (Windows Hosts File)
 
@@ -68,11 +68,11 @@ Configure DNS **first** so that records propagate while you deploy the servers.
 5. You will now see the `hosts` file (no extension) — click it and click **Open**.
 6. Scroll to the bottom of the file and add these two lines:
    ```
-   172.16.16.159    frontend.siv.org
-   172.16.16.69     backend.siv.org
+   172.16.16.159    pnc.frontend.siv.org
+   172.16.16.69     pnc.backend.siv.org
    ```
 7. Press **Ctrl+S** to save. Close Notepad.
-8. Open your browser and navigate to `http://frontend.siv.org` — it should now resolve.
+8. Open your browser and navigate to `http://pnc.frontend.siv.org` — it should now resolve.
 
 ---
 
@@ -211,7 +211,7 @@ Paste the following:
 // PM2 Configuration for Siv Backend
 // Server IP:       172.16.16.69
 // Target Location: /var/www/backend/pm2-backend.config.js
-// Domain:          backend.siv.org
+// Domain:          pnc.backend.siv.org
 // ============================================================================
 
 module.exports = {
@@ -253,7 +253,7 @@ DB_PASSWORD=siv_password_2026
 DB_NAME=siv_db
 
 # CORS — allow requests from the frontend origin
-CORS_ORIGIN=http://frontend.siv.org,http://172.16.16.159
+CORS_ORIGIN=http://pnc.frontend.siv.org,http://172.16.16.159
 ```
 Save and exit.
 
@@ -333,7 +333,7 @@ Paste the following:
 # Nginx Configuration for Siv Frontend
 # Server IP:       172.16.16.159
 # Target Location: /etc/nginx/sites-available/siv-frontend
-# Domain:          frontend.siv.org  (ISPConfig DNS A Record)
+# Domain:          pnc.frontend.siv.org  (ISPConfig DNS A Record)
 # Web Root:        /var/www/frontend/dist
 # ============================================================================
 
@@ -341,7 +341,7 @@ server {
     listen 80;
     listen [::]:80;
 
-    server_name frontend.siv.org 172.16.16.159;
+    server_name pnc.frontend.siv.org 172.16.16.159;
 
     root /var/www/frontend/dist;
     index index.html;
@@ -397,18 +397,18 @@ sudo ufw status
 - [ ] phpMyAdmin: `siv_db` → `products` table exists with 8 sample rows
 - [ ] From backend server: `mysql -h 192.168.108.234 -u siv_user -p siv_db` → connects OK
 
-### Backend (`172.16.16.69` / `backend.siv.org`)
+### Backend (`172.16.16.69` / `pnc.backend.siv.org`)
 - [ ] `pm2 list` → `siv-backend` status is **online**
 - [ ] `curl http://localhost:5000/api/health` → `{"status":"online","database":{"status":"connected"}}`
 - [ ] `curl http://localhost:5000/api/products` → returns JSON array of products
 
-### Frontend (`172.16.16.159` / `frontend.siv.org`)
+### Frontend (`172.16.16.159` / `pnc.frontend.siv.org`)
 - [ ] `sudo systemctl status nginx` → **active (running)**
 - [ ] `ls /var/www/frontend/dist` → shows `index.html` and `assets/`
 - [ ] Browser: `http://172.16.16.159` → Siv Inventory UI loads
 
 ### End-to-End
-- [ ] Browser: `http://frontend.siv.org` → UI loads correctly
+- [ ] Browser: `http://pnc.frontend.siv.org` → UI loads correctly
 - [ ] Click **Refresh** — product list loads without errors (Frontend → Backend ✅)
 - [ ] Click **Add Product**, submit a test item — it appears in the list (Backend → MySQL ✅)
 - [ ] phpMyAdmin → `siv_db` → `products` → new row is visible (MySQL write confirmed ✅)
@@ -419,8 +419,8 @@ sudo ufw status
 
 | Problem | Likely Cause | Fix |
 | :--- | :--- | :--- |
-| Blank page on `frontend.siv.org` | Wrong Nginx `root` path or `dist/` not uploaded | Verify `root /var/www/frontend/dist;` and run `ls /var/www/frontend/dist` |
-| CORS error in browser console | `CORS_ORIGIN` missing `http://frontend.siv.org` | Edit `/var/www/backend/.env`, add the origin, then `pm2 restart siv-backend` |
+| Blank page on `pnc.frontend.siv.org` | Wrong Nginx `root` path or `dist/` not uploaded | Verify `root /var/www/frontend/dist;` and run `ls /var/www/frontend/dist` |
+| CORS error in browser console | `CORS_ORIGIN` missing `http://pnc.frontend.siv.org` | Edit `/var/www/backend/.env`, add the origin, then `pm2 restart siv-backend` |
 | Backend can't reach MySQL | `bind-address` still `127.0.0.1` or UFW blocking | Set `bind-address = 0.0.0.0` in `mysqld.cnf`; allow port 3306 from `172.16.16.69` |
 | PM2 not running after reboot | `pm2 startup` command not applied | Run `pm2 startup`, then run the printed `sudo env PATH=...` command |
 | `nginx -t` fails | Syntax error in site config | Re-paste the Nginx block carefully; check for missing semicolons |
