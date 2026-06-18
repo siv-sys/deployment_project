@@ -1,7 +1,12 @@
 # Deployment Playbook: React + Express + MySQL Multi-Server Setup
 
 This is the **single complete deployment reference** for the Siv Inventory Management System.  
-All configuration (Nginx, PM2, environment) is embedded directly in this document — no separate config files required.
+Nginx and PM2 configuration are embedded directly in this document; everything else comes from the source repository.
+
+**Repository:** `https://github.com/siv-sys/deployment_project.git` (public, branch `master`)
+
+> [!NOTE]
+> **Starting fresh:** this version replaces the old manual SFTP drag-and-drop workflow with `git clone` on each server. If a server already has the repo from a previous attempt, run `git pull` inside it instead of cloning again.
 
 ---
 
@@ -13,12 +18,12 @@ User Browser
      │  HTTP :80  →  pnc.frontend.siv.org
      ▼
 Frontend Server ──────────────────── 172.16.16.159
-  Nginx → /var/www/frontend/dist
+  Nginx → /var/www/deployment_project/frontend/dist
      │
      │  API Requests :5000  →  pnc.backend.siv.org:5000
      ▼
 Backend Server ───────────────────── 172.16.16.69
-  Node.js / Express (PM2 Cluster)
+  Node.js / Express (PM2 Cluster) → /var/www/deployment_project/backend
      │
      │  MySQL :3306
      ▼
@@ -39,7 +44,7 @@ Database Server ──────────────────── 192
 Configure DNS **first** so that records propagate while you deploy the servers.
 
 > [!NOTE]
-> Your `siv.org` zone already has `frontend` → `172.16.16.159` and `backend` → `172.16.16.69` records (these resolve to `frontend.siv.org` / `backend.siv.org`). Those can stay as-is. The steps below add the **new** `pnc.*` subdomains this project actually uses (`pnc.frontend.siv.org` / `pnc.backend.siv.org`) — in ISPConfig, the **Name** field must include the `pnc.` prefix, since the zone itself is just `siv.org` and gets appended automatically.
+> Your `siv.org` zone may already have `frontend` → `172.16.16.159` and `backend` → `172.16.16.69` records (these resolve to `frontend.siv.org` / `backend.siv.org`). Those can stay as-is. The steps below add the `pnc.*` subdomains this project actually uses — in ISPConfig, the **Name** field must include the `pnc.` prefix, since the zone itself is just `siv.org` and gets appended automatically.
 
 ### 1.1 Add A Records in ISPConfig
 1. Log in to **ISPConfig** → **DNS** → **Zones** → click `siv.org`.
@@ -84,7 +89,7 @@ Configure DNS **first** so that records propagate while you deploy the servers.
 ### 2.1 Connect via MobaXterm SSH
 
 > [!WARNING]
-> **Known issue, confirmed:** connecting as `pnc@192.168.108.234` currently fails with `Permission denied (publickey,password)`. This is different from the backend (`172.16.16.69`) and frontend (`172.16.16.159`) servers, where the `pnc` user already connects successfully — so the DB server most likely either uses a different local username or only accepts key-based auth with a key your client doesn't currently have loaded. Work through the fixes below in order until one succeeds.
+> If `pnc@192.168.108.234` fails with `Permission denied (publickey,password)` while `pnc` works fine on the backend/frontend servers, the DB server most likely uses a different default username or only accepts key-based auth your client doesn't have loaded. Work through the fixes below in order.
 
 1. Open **MobaXterm** → **Session** → **SSH**.
 2. Set **Remote host** to `192.168.108.234`.
@@ -93,13 +98,8 @@ Configure DNS **first** so that records propagate while you deploy the servers.
 
 **Fix A — Try a different username:**
 ```bash
-# Try root
 ssh root@192.168.108.234
-
-# Try ubuntu (common on cloud VMs)
 ssh ubuntu@192.168.108.234
-
-# Try admin
 ssh admin@192.168.108.234
 ```
 
@@ -108,7 +108,7 @@ ssh admin@192.168.108.234
 2. Check **Use private key** and browse to your `.pem` or `id_rsa` private key file.
 3. Click **OK** to reconnect.
 
-**Fix C — Enable password authentication on the server** *(requires console/VNC access to the DB server, since SSH itself is currently blocked)*:
+**Fix C — Enable password authentication on the server** *(requires console/VNC access, since SSH itself is currently blocked)*:
 ```bash
 sudo nano /etc/ssh/sshd_config
 ```
@@ -121,9 +121,6 @@ Then restart SSH:
 ```bash
 sudo systemctl restart ssh
 ```
-
-**Fix D — Check if the DB server's firewall is blocking your specific source IP:**
-If the prompt for a password appears at all, the SSH service is reachable — the failure is auth, not network, so this is unlikely to be the cause. If no password prompt ever appears, check the DB server's `ufw status` (from console) for a rule restricting port 22.
 
 ### 2.2 Install MySQL Server
 ```bash
@@ -163,16 +160,20 @@ SELECT user, host FROM mysql.user;
 EXIT;
 ```
 
-### 2.5 Import Schema & Sample Data
-Using MobaXterm's **SFTP sidebar**:
-1. Navigate to `/tmp` in the SFTP panel.
-2. Drag and drop `database/schema.sql` from your local machine.
-3. Import:
+### 2.5 Clone the Repo and Import Schema
+
 ```bash
-mysql -u siv_user -p siv_db < /tmp/schema.sql
+sudo apt install -y git
+git clone https://github.com/siv-sys/deployment_project.git ~/deployment_project
+
+mysql -u siv_user -p siv_db < ~/deployment_project/database/schema.sql
 # Password: siv_password_2026
 ```
-> Verify in **phpMyAdmin** at `http://192.168.108.234/phpmyadmin` — `siv_db` → `products` table with 4 sample rows.
+
+> [!NOTE]
+> `schema.sql` inserts 8 sample products (`SKU-SIV-001` through `SKU-SIV-008`) using `ON DUPLICATE KEY UPDATE`, so re-running it is safe. If `products` previously showed fewer rows in phpMyAdmin, that was from an earlier partial import — this fresh import brings it to the full 8.
+
+Verify in **phpMyAdmin** at `http://192.168.108.234/phpmyadmin` — `siv_db` → `products` table with 8 sample rows.
 
 ### 2.6 Firewall
 ```bash
@@ -180,58 +181,7 @@ sudo ufw allow from 172.16.16.69 to any port 3306 proto tcp
 sudo ufw reload
 sudo ufw status
 ```
-___________________________________________
-# Yes, absolutely! Since you are on Windows, you can achieve the exact same rule (allowing IP 172.16.16.69 to access your MySQL port 3306) right from the screen you have open.
 
-To do this completely through the interface without commands, follow these steps:
-
-## Step 1: Open Advanced Settings
-Look at the left-hand sidebar of your current window.
-
-Click on Advanced settings (it has a blue and yellow shield icon next to it).
-
-A new window titled Windows Defender Firewall with Advanced Security will open.
-
-## Step 2: Create a New Inbound Rule
-In the left sidebar of the new window, click on Inbound Rules.
-
-In the right-hand sidebar (the Actions pane), click on New Rule....
-
-## Step 3: Configure the Port and Protocol
-A wizard will pop up to guide you through the settings:
-
-Rule Type: Select Port and click Next.
-
-Protocol and Ports: * Choose TCP.
-
-Under Specific local ports, type: 3306
-
-Click Next.
-
-Action: Select Allow the connection and click Next.
-
-Profile: Leave all boxes checked (Domain, Private, Public) and click Next.
-
-Name: Give it a name you'll remember (e.g., MySQL Allow Specific IP) and click Finish.
-
-## Step 4: Restrict to the Specific IP (172.16.16.69)
-Right now, port 3306 is open to everyone. Let's lock it down to just your specific IP address:
-
-In the middle list of Inbound Rules, find the rule you just created (MySQL Allow Specific IP).
-
-Double-click it to open its Properties.
-
-Switch to the Scope tab at the top.
-
-Under the Remote IP address section (the bottom half), change the selection from Any IP address to These IP addresses.
-
-Click the Add... button next to it.
-
-Select This IP address or subnet, type in 172.16.16.69, and click OK.
-
-Click Apply and then OK.
-
-__________________________________________
 ---
 
 ## ⚙️ Step 3: Backend API Server (`172.16.16.69`)
@@ -252,25 +202,33 @@ node -v && npm -v
 sudo npm install -g pm2
 ```
 
-### 3.4 Prepare Directory and Upload Code
+### 3.4 Clone the Repository
 ```bash
-sudo mkdir -p /var/www/backend
-sudo chown -R $USER:$USER /var/www/backend
+sudo mkdir -p /var/www/deployment_project
+sudo chown -R $USER:$USER /var/www/deployment_project
+sudo apt install -y git
+
+git clone https://github.com/siv-sys/deployment_project.git /var/www/deployment_project
+cd /var/www/deployment_project/backend
 ```
-In MobaXterm's **SFTP sidebar**, navigate to `/var/www/backend` and upload:
-- `backend/server.js`
-- `backend/package.json`
+
+> [!NOTE]
+> The repo also contains `deployment/pm2-backend.config.js`, but that file is just a deprecated placeholder pointing back to this README — don't use it. Create the real config below directly inside the `backend` folder.
 
 ### 3.5 Create PM2 Config on Server
+
+> [!IMPORTANT]
+> Use the **`.cjs`** extension, not `.js`. `backend/package.json` has `"type": "module"`, which makes Node treat every `.js` file as an ES Module — but this config uses CommonJS `module.exports`. Naming it `.cjs` avoids a `ReferenceError: module is not defined in ES module scope` error.
+
 ```bash
-nano /var/www/backend/pm2-backend.config.js
+nano /var/www/deployment_project/backend/pm2-backend.config.cjs
 ```
 Paste the following:
 ```js
 // ============================================================================
 // PM2 Configuration for Siv Backend
 // Server IP:       172.16.16.69
-// Target Location: /var/www/backend/pm2-backend.config.js
+// Target Location: /var/www/deployment_project/backend/pm2-backend.config.cjs
 // Domain:          pnc.backend.siv.org
 // ============================================================================
 
@@ -279,7 +237,7 @@ module.exports = {
     {
       name: 'siv-backend',
       script: './server.js',
-      cwd: '/var/www/backend',
+      cwd: '/var/www/deployment_project/backend',
       instances: 'max',         // Cluster mode — one process per CPU core
       exec_mode: 'cluster',
       autorestart: true,        // Auto-restart on crash
@@ -297,7 +255,7 @@ Save and exit.
 
 ### 3.6 Create Environment File
 ```bash
-nano /var/www/backend/.env
+nano /var/www/deployment_project/backend/.env
 ```
 Paste:
 ```env
@@ -319,7 +277,7 @@ Save and exit.
 
 ### 3.7 Install Dependencies and Launch
 ```bash
-cd /var/www/backend
+cd /var/www/deployment_project/backend
 npm install --omit=dev
 
 # Start with PM2
@@ -350,18 +308,10 @@ sudo ufw status
 
 ## 🖥️ Step 4: Frontend Server (`172.16.16.159`)
 
-### 4.1 Build Locally (Windows)
-On your local machine, open PowerShell in the `frontend/` folder:
-```powershell
-npm install
-npm run build
-```
-Output: `frontend/dist/` — contains `index.html` and `assets/`.
-
-### 4.2 Connect via MobaXterm SSH
+### 4.1 Connect via MobaXterm SSH
 Remote host: `172.16.16.159`, username: `pnc`.
 
-### 4.3 Install Nginx
+### 4.2 Install Nginx
 ```bash
 sudo apt update
 sudo apt install -y nginx
@@ -369,21 +319,29 @@ sudo systemctl start nginx
 sudo systemctl enable nginx
 ```
 
-### 4.4 Prepare Directory and Upload Build
+### 4.3 Clone the Repository and Build
+No more building on Windows and SFTP'ing the `dist/` folder — clone and build directly on the server:
 ```bash
-sudo mkdir -p /var/www/frontend
-sudo chown -R $USER:$USER /var/www/frontend
+sudo mkdir -p /var/www/deployment_project
+sudo chown -R $USER:$USER /var/www/deployment_project
+sudo apt install -y git
+
+git clone https://github.com/siv-sys/deployment_project.git /var/www/deployment_project
+cd /var/www/deployment_project/frontend
+
+sudo apt install -y nodejs npm    # skip if Node is already installed
+npm install
+npm run build
 ```
-In MobaXterm's **SFTP sidebar**, navigate to `/var/www/frontend`.  
-Drag and drop the **entire `dist/` folder** from your local `frontend/dist/`.
+Output: `/var/www/deployment_project/frontend/dist/` — contains `index.html` and `assets/`.
 
 Verify:
 ```bash
-ls /var/www/frontend/dist
+ls /var/www/deployment_project/frontend/dist
 # Expected: index.html  assets/
 ```
 
-### 4.5 Create Nginx Site Configuration
+### 4.4 Create Nginx Site Configuration
 ```bash
 sudo nano /etc/nginx/sites-available/siv-frontend
 ```
@@ -394,7 +352,7 @@ Paste the following:
 # Server IP:       172.16.16.159
 # Target Location: /etc/nginx/sites-available/siv-frontend
 # Domain:          pnc.frontend.siv.org  (ISPConfig DNS A Record)
-# Web Root:        /var/www/frontend/dist
+# Web Root:        /var/www/deployment_project/frontend/dist
 # ============================================================================
 
 server {
@@ -403,7 +361,7 @@ server {
 
     server_name pnc.frontend.siv.org 172.16.16.159;
 
-    root /var/www/frontend/dist;
+    root /var/www/deployment_project/frontend/dist;
     index index.html;
 
     # Gzip compression for faster page loading
@@ -431,9 +389,13 @@ server {
     error_log  /var/log/nginx/siv-frontend-error.log;
 }
 ```
+
+> [!NOTE]
+> The repo also contains `deployment/nginx-frontend.conf`, but like the PM2 file, it's a deprecated placeholder pointing back to this README — don't use it directly.
+
 Save and exit.
 
-### 4.6 Enable Site and Reload Nginx
+### 4.5 Enable Site and Reload Nginx
 ```bash
 sudo ln -sf /etc/nginx/sites-available/siv-frontend /etc/nginx/sites-enabled/
 sudo rm -f /etc/nginx/sites-enabled/default
@@ -441,7 +403,7 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
-### 4.7 Firewall
+### 4.6 Firewall
 ```bash
 sudo ufw allow 'Nginx Full'
 sudo ufw reload
@@ -450,11 +412,32 @@ sudo ufw status
 
 ---
 
+## 🔄 Updating After the Initial Clone
+
+Once each server has the repo cloned, future updates are a pull + restart instead of a full re-clone:
+
+```bash
+# Backend
+cd /var/www/deployment_project && git pull
+cd backend && npm install --omit=dev && pm2 restart siv-backend
+
+# Frontend
+cd /var/www/deployment_project && git pull
+cd frontend && npm install && npm run build
+# Nginx serves the new dist/ automatically — no reload needed unless the config itself changed
+
+# Database (only if schema.sql changed)
+cd ~/deployment_project && git pull
+mysql -u siv_user -p siv_db < database/schema.sql
+```
+
+---
+
 ## 🔍 Step 5: Verification Checklist
 
 ### Database (`192.168.108.234`)
 - [ ] `sudo systemctl status mysql` → **active (running)**
-- [ ] phpMyAdmin: `siv_db` → `products` table exists with 4 sample rows
+- [ ] phpMyAdmin: `siv_db` → `products` table exists with 8 sample rows
 - [ ] From backend server: `mysql -h 192.168.108.234 -u siv_user -p siv_db` → connects OK
 
 ### Backend (`172.16.16.69` / `pnc.backend.siv.org`)
@@ -464,7 +447,7 @@ sudo ufw status
 
 ### Frontend (`172.16.16.159` / `pnc.frontend.siv.org`)
 - [ ] `sudo systemctl status nginx` → **active (running)**
-- [ ] `ls /var/www/frontend/dist` → shows `index.html` and `assets/`
+- [ ] `ls /var/www/deployment_project/frontend/dist` → shows `index.html` and `assets/`
 - [ ] Browser: `http://172.16.16.159` → Siv Inventory UI loads
 
 ### End-to-End
@@ -479,30 +462,34 @@ sudo ufw status
 
 | Problem | Likely Cause | Fix |
 | :--- | :--- | :--- |
-| Blank page on `pnc.frontend.siv.org` | Wrong Nginx `root` path or `dist/` not uploaded | Verify `root /var/www/frontend/dist;` and run `ls /var/www/frontend/dist` |
-| CORS error in browser console | `CORS_ORIGIN` missing `http://pnc.frontend.siv.org` | Edit `/var/www/backend/.env`, add the origin, then `pm2 restart siv-backend` |
+| Blank page on `pnc.frontend.siv.org` | Wrong Nginx `root` path or `dist/` not built | Verify `root /var/www/deployment_project/frontend/dist;` and run `ls` on that path |
+| CORS error in browser console | `CORS_ORIGIN` missing `http://pnc.frontend.siv.org` | Edit `.env`, add the origin, then `pm2 restart siv-backend` |
 | Backend can't reach MySQL | `bind-address` still `127.0.0.1` or UFW blocking | Set `bind-address = 0.0.0.0` in `mysqld.cnf`; allow port 3306 from `172.16.16.69` |
 | PM2 not running after reboot | `pm2 startup` command not applied | Run `pm2 startup`, then run the printed `sudo env PATH=...` command |
 | `nginx -t` fails | Syntax error in site config | Re-paste the Nginx block carefully; check for missing semicolons |
+| `[PM2][ERROR] File ... malformated` / `module is not defined in ES module scope` | PM2 config saved as `.js` while `package.json` has `"type": "module"` | Rename to `pm2-backend.config.cjs` and run `pm2 start pm2-backend.config.cjs` |
 | DNS not resolving | Propagation delay or wrong ISPConfig A record | Verify the A record Name is `pnc.frontend`/`pnc.backend` (not just `frontend`/`backend`); use hosts file for immediate local testing |
-| `ssh pnc@<DB-IP>` → `Permission denied (publickey,password)` | DB server uses a different default user, or only allows key auth | See Step 2.1 — try `root`/`ubuntu`/`admin`, load the correct private key in MobaXterm's Advanced SSH settings, or enable password auth via console access |
+| `ssh pnc@<DB-IP>` → `Permission denied (publickey,password)` | DB server uses a different default user, or only allows key auth | See Step 2.1 — try `root`/`ubuntu`/`admin`, load the correct key, or enable password auth via console access |
+| `git clone` fails / times out | Server has no outbound internet access, or `git` isn't installed | `sudo apt install -y git`; check outbound HTTPS is allowed (`curl -I https://github.com`) |
 
 ---
 
 ## 📁 Project File Reference
 
 ```
-deploy_project/
+deployment_project/                    # ← cloned via git on each server
 ├── backend/
 │   ├── server.js              # Express API (ES Module, port 5000)
-│   ├── package.json           # Dependencies: express, cors, mysql2, dotenv
-│   └── .env.example           # Environment variable template
+│   ├── package.json           # type: module — pm2 config must be .cjs
+│   └── (pm2-backend.config.cjs and .env are created manually — not in repo)
 ├── database/
-│   └── schema.sql             # Creates siv_db, siv_user, products table + 4 sample rows
+│   └── schema.sql             # Creates siv_db, siv_user, products table + 8 sample rows
 ├── frontend/
 │   ├── src/                   # React source files
-│   ├── dist/                  # ← Built output: upload to /var/www/frontend/dist
-│   └── package.json           # Vite + React 18
+│   ├── package.json           # Vite + React 18 (npm run build → dist/)
+│   └── dist/                  # ← generated on the frontend server, not committed
 └── deployment/
-    └── README.md              # ← THIS FILE — single complete deployment reference
+    ├── README.md               # Original repo README (superseded by this document)
+    ├── pm2-backend.config.js   # Deprecated placeholder — do not use
+    └── nginx-frontend.conf     # Deprecated placeholder — do not use
 ```
