@@ -38,6 +38,9 @@ Database Server ──────────────────── 192
 
 Configure DNS **first** so that records propagate while you deploy the servers.
 
+> [!NOTE]
+> Your `siv.org` zone already has `frontend` → `172.16.16.159` and `backend` → `172.16.16.69` records (these resolve to `frontend.siv.org` / `backend.siv.org`). Those can stay as-is. The steps below add the **new** `pnc.*` subdomains this project actually uses (`pnc.frontend.siv.org` / `pnc.backend.siv.org`) — in ISPConfig, the **Name** field must include the `pnc.` prefix, since the zone itself is just `siv.org` and gets appended automatically.
+
 ### 1.1 Add A Records in ISPConfig
 1. Log in to **ISPConfig** → **DNS** → **Zones** → click `siv.org`.
 2. Open the **Records** tab.
@@ -45,8 +48,8 @@ Configure DNS **first** so that records propagate while you deploy the servers.
 
 | Type | Name | Data (IP) | TTL |
 | :--- | :--- | :--- | :--- |
-| `A` | `frontend` | `172.16.16.159` | `3600` |
-| `A` | `backend` | `172.16.16.69` | `3600` |
+| `A` | `pnc.frontend` | `172.16.16.159` | `3600` |
+| `A` | `pnc.backend` | `172.16.16.69` | `3600` |
 
 > This makes:
 > - `pnc.frontend.siv.org` → Frontend Server `172.16.16.159`
@@ -80,13 +83,13 @@ Configure DNS **first** so that records propagate while you deploy the servers.
 
 ### 2.1 Connect via MobaXterm SSH
 
+> [!WARNING]
+> **Known issue, confirmed:** connecting as `pnc@192.168.108.234` currently fails with `Permission denied (publickey,password)`. This is different from the backend (`172.16.16.69`) and frontend (`172.16.16.159`) servers, where the `pnc` user already connects successfully — so the DB server most likely either uses a different local username or only accepts key-based auth with a key your client doesn't currently have loaded. Work through the fixes below in order until one succeeds.
+
 1. Open **MobaXterm** → **Session** → **SSH**.
 2. Set **Remote host** to `192.168.108.234`.
 3. Check **Specify username** and enter `pnc`.
 4. Click **OK** and enter the password when prompted.
-
-> [!WARNING]
-> If you see **`Permission denied (publickey,password)`**, the database server may use a **different username** or may require an **SSH key**. Try the following:
 
 **Fix A — Try a different username:**
 ```bash
@@ -95,6 +98,9 @@ ssh root@192.168.108.234
 
 # Try ubuntu (common on cloud VMs)
 ssh ubuntu@192.168.108.234
+
+# Try admin
+ssh admin@192.168.108.234
 ```
 
 **Fix B — SSH key not loaded in MobaXterm:**
@@ -102,7 +108,7 @@ ssh ubuntu@192.168.108.234
 2. Check **Use private key** and browse to your `.pem` or `id_rsa` private key file.
 3. Click **OK** to reconnect.
 
-**Fix C — Enable password authentication on the server** *(requires console/VNC access to the DB server)*:
+**Fix C — Enable password authentication on the server** *(requires console/VNC access to the DB server, since SSH itself is currently blocked)*:
 ```bash
 sudo nano /etc/ssh/sshd_config
 ```
@@ -115,6 +121,9 @@ Then restart SSH:
 ```bash
 sudo systemctl restart ssh
 ```
+
+**Fix D — Check if the DB server's firewall is blocking your specific source IP:**
+If the prompt for a password appears at all, the SSH service is reachable — the failure is auth, not network, so this is unlikely to be the cause. If no password prompt ever appears, check the DB server's `ufw status` (from console) for a rule restricting port 22.
 
 ### 2.2 Install MySQL Server
 ```bash
@@ -163,7 +172,7 @@ Using MobaXterm's **SFTP sidebar**:
 mysql -u siv_user -p siv_db < /tmp/schema.sql
 # Password: siv_password_2026
 ```
-> Verify in **phpMyAdmin** at `http://192.168.108.234/phpmyadmin` — `siv_db` → `products` table with 8 sample rows.
+> Verify in **phpMyAdmin** at `http://192.168.108.234/phpmyadmin` — `siv_db` → `products` table with 4 sample rows.
 
 ### 2.6 Firewall
 ```bash
@@ -171,7 +180,58 @@ sudo ufw allow from 172.16.16.69 to any port 3306 proto tcp
 sudo ufw reload
 sudo ufw status
 ```
+___________________________________________
+# Yes, absolutely! Since you are on Windows, you can achieve the exact same rule (allowing IP 172.16.16.69 to access your MySQL port 3306) right from the screen you have open.
 
+To do this completely through the interface without commands, follow these steps:
+
+## Step 1: Open Advanced Settings
+Look at the left-hand sidebar of your current window.
+
+Click on Advanced settings (it has a blue and yellow shield icon next to it).
+
+A new window titled Windows Defender Firewall with Advanced Security will open.
+
+## Step 2: Create a New Inbound Rule
+In the left sidebar of the new window, click on Inbound Rules.
+
+In the right-hand sidebar (the Actions pane), click on New Rule....
+
+## Step 3: Configure the Port and Protocol
+A wizard will pop up to guide you through the settings:
+
+Rule Type: Select Port and click Next.
+
+Protocol and Ports: * Choose TCP.
+
+Under Specific local ports, type: 3306
+
+Click Next.
+
+Action: Select Allow the connection and click Next.
+
+Profile: Leave all boxes checked (Domain, Private, Public) and click Next.
+
+Name: Give it a name you'll remember (e.g., MySQL Allow Specific IP) and click Finish.
+
+## Step 4: Restrict to the Specific IP (172.16.16.69)
+Right now, port 3306 is open to everyone. Let's lock it down to just your specific IP address:
+
+In the middle list of Inbound Rules, find the rule you just created (MySQL Allow Specific IP).
+
+Double-click it to open its Properties.
+
+Switch to the Scope tab at the top.
+
+Under the Remote IP address section (the bottom half), change the selection from Any IP address to These IP addresses.
+
+Click the Add... button next to it.
+
+Select This IP address or subnet, type in 172.16.16.69, and click OK.
+
+Click Apply and then OK.
+
+__________________________________________
 ---
 
 ## ⚙️ Step 3: Backend API Server (`172.16.16.69`)
@@ -263,7 +323,7 @@ cd /var/www/backend
 npm install --omit=dev
 
 # Start with PM2
-pm2 start pm2-backend.config.js
+pm2 start pm2-backend.config.cjs
 
 # Save process list and enable auto-start on reboot
 pm2 save
@@ -394,7 +454,7 @@ sudo ufw status
 
 ### Database (`192.168.108.234`)
 - [ ] `sudo systemctl status mysql` → **active (running)**
-- [ ] phpMyAdmin: `siv_db` → `products` table exists with 8 sample rows
+- [ ] phpMyAdmin: `siv_db` → `products` table exists with 4 sample rows
 - [ ] From backend server: `mysql -h 192.168.108.234 -u siv_user -p siv_db` → connects OK
 
 ### Backend (`172.16.16.69` / `pnc.backend.siv.org`)
@@ -424,7 +484,8 @@ sudo ufw status
 | Backend can't reach MySQL | `bind-address` still `127.0.0.1` or UFW blocking | Set `bind-address = 0.0.0.0` in `mysqld.cnf`; allow port 3306 from `172.16.16.69` |
 | PM2 not running after reboot | `pm2 startup` command not applied | Run `pm2 startup`, then run the printed `sudo env PATH=...` command |
 | `nginx -t` fails | Syntax error in site config | Re-paste the Nginx block carefully; check for missing semicolons |
-| DNS not resolving | Propagation delay or wrong ISPConfig A record | Verify A record IP in ISPConfig; use hosts file for immediate local testing |
+| DNS not resolving | Propagation delay or wrong ISPConfig A record | Verify the A record Name is `pnc.frontend`/`pnc.backend` (not just `frontend`/`backend`); use hosts file for immediate local testing |
+| `ssh pnc@<DB-IP>` → `Permission denied (publickey,password)` | DB server uses a different default user, or only allows key auth | See Step 2.1 — try `root`/`ubuntu`/`admin`, load the correct private key in MobaXterm's Advanced SSH settings, or enable password auth via console access |
 
 ---
 
@@ -437,7 +498,7 @@ deploy_project/
 │   ├── package.json           # Dependencies: express, cors, mysql2, dotenv
 │   └── .env.example           # Environment variable template
 ├── database/
-│   └── schema.sql             # Creates siv_db, siv_user, products table + 8 sample rows
+│   └── schema.sql             # Creates siv_db, siv_user, products table + 4 sample rows
 ├── frontend/
 │   ├── src/                   # React source files
 │   ├── dist/                  # ← Built output: upload to /var/www/frontend/dist
